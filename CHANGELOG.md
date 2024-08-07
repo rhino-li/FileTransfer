@@ -1,0 +1,86 @@
+# 更新日志
+## 8.6
+### 测试
+- 测试客户端连续多次上传/下载文件，暂停/继续，无问题
+
+## 8.5
+### 优化
+- 分别给客户端和服务端的发送接收操作实现不同的接口，仅在客户端的发送接收操作上提供暂停/继续等功能；
+### 修复
+- 在一个客户端长连接中，连续多次发送接收文件时，出现的第二次通信接收数据错乱的问题，即多次业务处理时recv会读到过期数据 --> 在每次业务完成后利用select的特性清空socket的接收缓冲区；
+
+## 8.2
+### 新增
+- 增加接收方可暂停、继续
+### 修复
+- 修改接收方为可暂停、继续之后，接收方合并后的文件md5与发送方发来的md5不等 --> 把分片接收功能整合到一个函数splice_recv中，每接收到一个分片，就需要把分片数据写入该文件的FileCTX结构的`std::vector<std::pair<size_t,const char*>> chunks`变量中，虽然引用传递了文件的FileCTX结构，但是在保存char*数据时犯了一些错误。
+    - 错误1：`fread(buffer,1,sizeof(buffer),fp)`从文件读数据到buffer，buffer为`char []`类型，不能直接保存buffer。循环从文件中读数据到buffer后，先前保存的分片数据会随着buffer的改变而变化，需要保存buffer的深拷贝。
+    - 错误2：`char tmp[CHUNK_SIZE]; strcpy(tmp,buffer);`，buffer中的数据时字节类型的文件数据，不是字符串，strcpy会在遇到0x00时停止复制操作，导致拷贝不全。
+    - 错误3：`char tmp[CHUNK_SIZE]; memcpy(tmp,buffer,sizeof(buffer));`，合并分片的操作在splice_recv返回后，临时变量tmp存储在splice_recv的栈帧中，splice_recv返回后tmp被释放，chunks中保存的仅仅是悬空指针，不再指向有效的内存空间。因此在splice_recv中需要给tmp动态分配空间到堆上，以保证指针有效。
+
+## 8.1
+### 测试
+- 验证分片发送接收、暂停、继续功能
+### 修复
+- Client端ctrl+c终止时，Server工作线程Broken pipe异常导致进程崩溃 --> 补充Server和Client类析构函数的定义；捕获SIGPIPE信号并忽略；接收所有send的返回值处理，保证工作线程正常退出；
+- Server方子线程异常时进程崩溃 --> try-catch捕获子线程异常；
+### 新增
+- 封装读写锁，在操作FileOperator类的私有数据成员时加锁保护；
+
+## 7.31
+### 问题排查
+- recv不能读取到预期字节数 --> 消息头中加数据长度，while循环直到读取到所需数据长度为止。
+- 连续send时接收数据错乱 --> 禁用TCP的nagle算法；每个send后接收方都发送‘ack’确认，以阻塞发送方。
+- 合并后的文件md5与发送方发来的md5不等 --> 每个分片数据保存为char*，不能以约定的chunk_size来fwrite，接收方在接收分片时应当保存分片数据大小；
+
+## 7.30
+### 新增
+- recv_file修改成分片接收
+- 基于大文件的分片发送和接收实现暂停/继续/断点续传
+### 问题排查
+- 执行FileOperator类中的成员方法时，出现的段错误:定义的SendInfo结构体中包含char buffer[CHUNK_SIZE] = {0};其中`CHUNK_SIZE=10*1024*1024` 太大，导致数组越界引发的段错误，改用char*
+
+## 7.29
+### 优化
+- 把服务器和客户端重复的send_file/recv_file整合到FileOperator类中
+- send_file修改成分片发送
+
+## 7.27
+### 新增
+- 并发模型的实现
+### 优化
+- 优化服务器框架设计，支持worker thread与客户端长连接，持续多次通信
+
+## 7.26
+### 并发模型设计
+服务器主线程初始化线程池 创建n个线程，之后阻塞在accept。每次客户端connect连接过来，main thread中accept响应并建立连接
+创建连接成功，得到connect fd套接字后，唤醒线程池中的一个worker thread来处理客户端的业务。mian thread依然回到accept阻塞等待新客户端。
+worker thread通过套接字connect fd与客户端进行读写操作，客户端断开连接时将worker thread回收到线程池中。
+### 修复
+- 修复接收文件模块，可以接收到文件，但进程会阻塞在recv处 问题：recv循环接收文件时，不能以`recv的返回值>0`作为接收的终止条件，以`接收到的全部字节>=原始文件大小`为终止条件修复此问题
+#### 猜测都是因为粘包问题
+- 多次循环使用send和recv时，recv不能读取到预期数据
+- recv到的文件字节数大于send的原始文件字节数，文件格式正确
+
+
+## 7.25
+### 新增
+- 新增ThreadPool线程池功能
+- 验证多线程并发能力
+
+## 7.24
+### 新增
+- 新增flie-client类，实现客户端相关API
+- 验证模块化后的双方文件传输功能
+
+## 7.23
+### 新增
+- 新增flie-server类，实现服务端相关API
+
+## 7.22
+### 新增
+- 封装通用IP地址类、底层socket接口
+
+## 7.19
+### 新增
+- 新增demo-client和demo-server，实现简易的基于socket的文件传输功能
