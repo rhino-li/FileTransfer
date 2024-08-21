@@ -14,18 +14,56 @@
 #include <dirent.h>
 #include <cstring>
 #include <errno.h>
+#include <cmath>
+#include <istream>
+#include <sstream>
+
+
+#include "../src/protocol/protocol.pb.h"
 
 using namespace std;
  
 #define portnum 12345
 #define FILE_SIZE 500 
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE (10*1024)
+#define HEADER_LEN 20
 
 struct fileContext
 {
 	char filename[50];
 	size_t filesize;
 };
+
+std::vector<std::string> split(std::string str, char del) 
+{
+	std::stringstream ss(str);
+	std::string temp;
+	std::vector<std::string> ret;
+	while (getline(ss, temp, del)) {
+		ret.push_back(temp);
+	}
+	return ret;
+}
+
+std::string get_file_md5(string filepath)
+{
+    char cwd[100];
+    getcwd(cwd,sizeof(cwd));
+    chdir(cwd);
+    char cmd[100] = "md5sum ";
+    strcat(cmd,filepath.c_str());
+    FILE* pipe = popen(cmd,"r");
+    if(!pipe)
+    {
+        printf("popen error.\n");
+        exit(2);
+    }
+    std::string result;
+    char buffer[200];
+    fgets(buffer,sizeof(buffer),pipe);
+    result = split(buffer,' ')[0];
+    return result;
+}
 
 void getFileNames(std::string path, std::vector<string>& files)
 {
@@ -65,60 +103,119 @@ int main()
 		int connect_fd=accept(server_fd,(struct sockaddr *)&client_addr,&size);  //server_fd服务器的socket描述字,&client_addr指向struct sockaddr *的指针,&size指向协议地址长度指针
 		printf("accepted client ip:%s:%d\n",inet_ntoa(client_addr.sin_addr),client_addr.sin_port);
 
+		fileprotocol::MsgHeader send_header;
+		fileprotocol::MsgBody send_body;
+		send_header.set_magic(0xABCD);
+		send_header.set_version(240810);
+
 		while(1)
 		{
-			char status[4] = {0};
-			recv(connect_fd,status,sizeof(status),0);
-			std::cout<<"recv status from client:"<<status<<std::endl;
-			int choice = atoi(status);
+			fileprotocol::MsgHeader recv_header;
+			char recv_header_bytes[HEADER_LEN];
+			recv(connect_fd,recv_header_bytes,sizeof(recv_header_bytes),0);
+			recv_header.ParseFromArray(recv_header_bytes,sizeof(recv_header_bytes));
 
-			if(choice==1)
+			if(recv_header.magic()!=0xABCD || recv_header.version()!=240810)
 			{
+				std::cout<<"not my package."<<std::endl;
+				continue;
+			}
+
+			if(recv_header.type()==fileprotocol::MsgType::BROWSE_REQUEST)
+			{
+				std::cout<<"client request optional files list."<<std::endl;
 				vector<string> fileNames;
       			string path("file");
       			getFileNames(path, fileNames);
-      			char testname[500]={0};
+				send_header.set_type(fileprotocol::MsgType::BROWSE_RESPONSE);
+				fileprotocol::BrowseResponse browse_response;
       			for (const auto &ph : fileNames) 
 				{
-        			strcat(testname ,ph.c_str());
-        			strcat(testname,";");
+					browse_response.add_filenames(ph);
 	    		}
-      			// cout<<testname<<endl;
-      			send(connect_fd, testname,sizeof(testname),0);
-				break;
+				send_body.set_allocated_browse_response(&browse_response);
+				uint32_t send_body_size = send_body.ByteSize();
+				char send_body_bytes[send_body_size];
+				send_body.SerializeToArray(send_body_bytes,send_body_size);
+				char send_header_bytes[HEADER_LEN];
+				send_header.set_length(send_body_size);
+				send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+				send(connect_fd,send_header_bytes,sizeof(send_header_bytes),0);
+      			send(connect_fd, send_body_bytes,send_body_size,0);
+				recv_header.clear_type();
+				memset(recv_header_bytes,0,sizeof(recv_header_bytes));
+				recv(connect_fd,recv_header_bytes,sizeof(recv_header_bytes),0);
+				recv_header.ParseFromArray(recv_header_bytes,sizeof(recv_header_bytes));
+				if(recv_header.type()==fileprotocol::MsgType::ACK) continue;
+				else break;
 			}
-			else if (choice==2)
+			else if (recv_header.type()==fileprotocol::MsgType::FILE_UPLOAD_REQUEST)
 			{
-				fileContext fileCtx;
-      			size_t fileSize = 0;
-      			char filename[50] = {0};
-      			// 接收ftp client发送过来的文件长度与文件名 
-      			char sizeFileStr[20] = {0};
-      			recv(connect_fd, (char*)&fileCtx, sizeof(fileCtx), 0);
-      
-      			fileSize = fileCtx.filesize;
-      			// int fileSize = atoi(sizeFileStr);
+				// 接收文件摘要
+				fileprotocol::MsgBody recv_body;
+				fileprotocol::FileSummary file_summary;
+				uint32_t recv_body_size = recv_header.length();
+				char recv_body_bytes[recv_body_size];
+				int size = 0;
+				while(size<recv_body_size)
+				{
+					int remain_len = recv_body_size-size;
+					size += recv(connect_fd,recv_body_bytes+size,remain_len,0);
+				}
+				recv_body.ParseFromArray(recv_body_bytes,recv_body_size);
+				file_summary = recv_body.file_summary();
+				std::cout<<"client wanna upload file:"<<file_summary.filename()<<std::endl;
+				
+				// 发送ack
+				char send_header_bytes[HEADER_LEN];
+				send_header.set_type(fileprotocol::MsgType::ACK);
+				send_header.set_length(0);
+				send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+				send(connect_fd,send_header_bytes,sizeof(send_header_bytes),0);
 
-      			strcpy(filename, fileCtx.filename);
-    
-      			// 接收ftp client发送的文件并保存
-      			char recvBuf[1024*1024] = {0};  
-      			int recvTotalSize = 0;
-      			char file[50] = "./file/";
-      			strcat(file,filename);
+				// 接收文件内容
+				fileprotocol::FileTransfer file_transfer;
+				recv_body.Clear();
+				memset(recv_header_bytes,0,sizeof(recv_header_bytes));
+				recv(connect_fd,recv_header_bytes,sizeof(recv_header_bytes),0);
+				recv_header.ParseFromArray(recv_header_bytes,sizeof(recv_header_bytes));
+				recv_body_size = recv_header.length();
+				char *recv_body_bytes_ctx = new char[recv_body_size];
+				size = 0;
+				while(size<recv_body_size)
+				{
+					int remain_len = recv_body_size-size;
+					size += recv(connect_fd,recv_body_bytes_ctx+size,remain_len,0);
+				}
+				recv_body.ParseFromArray(recv_body_bytes_ctx,recv_body_size);
+				file_transfer = recv_body.file_transfer();
+
+				char file[50] = "./file/";
+      			strcat(file,file_summary.filename().c_str());
       			FILE *fp = fopen(file, "wb");
-      			while(recvTotalSize < fileSize)
-      			{
-        			int recvSize = recv(connect_fd, recvBuf, sizeof(recvBuf), 0);
-        			recvTotalSize += recvSize;
-        			printf("received %f KB\n", recvTotalSize/(1024.0));
-        			fwrite(recvBuf, 1, recvSize, fp);
-      			}
-      			fclose(fp);
-      			if(recvTotalSize == fileSize) printf("Done!\n");
-      			else printf("Error!");
+				fwrite(file_transfer.data().c_str(), 1, file_transfer.data_len(), fp);
+				fclose(fp);
+				string md5 = get_file_md5(file);
+				if(md5 == file_summary.filehash())
+				{
+					printf("received %f KB\n", file_transfer.data_len()/(1024.0));
+				}
+				else
+				{
+					std::cout<<"Error:md5 not equal."<<std::endl;
+					break;
+				}
+
+				// 发送ack
+				memset(send_header_bytes,0,sizeof(send_header_bytes));
+				send_header.set_type(fileprotocol::MsgType::ACK);
+				send_header.set_length(0);
+				send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+				send(connect_fd,send_header_bytes,sizeof(send_header_bytes),0);
+				delete recv_body_bytes_ctx;
+
 			}
-			else if(choice==3)
+			else if(recv_header.type()==fileprotocol::MsgType::FILE_DOWNLOAD_REQUEST)
 			{
 				fileContext re_fileMsg;
       			char re_filename[50] = {0};
@@ -152,7 +249,7 @@ int main()
       			if(sendTotalSize == totalSize) printf("Done!\n");
       			else printf("Error!");
 			}
-			else if(choice==4)
+			else if(recv_header.type()==fileprotocol::MsgType::CLOSE)
 			{
 				break;
 			}
@@ -162,14 +259,6 @@ int main()
 			
 		}
 		
-		// int pthread_id;
-		// int ret = pthread_create((pthread_t *)&pthread_id,NULL,net_thread,(void *)&new_fd);
-		// if(-1==ret)
-		// {
-		// 	perror("pthread_create");
-		// 	close(new_fd);
-		// 	continue;
-		// }
 	}
 		
 	close(server_fd);

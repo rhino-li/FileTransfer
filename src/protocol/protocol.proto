@@ -1,0 +1,116 @@
+//  protoc --cpp_out=./ ./protocol.proto
+syntax = "proto3";
+package fileprotocol;
+
+enum Status // 传输状态
+{
+    TRANSFERRING = 0;
+    PAUSE = 1;
+    END = 2;
+    DONE = 3;
+};
+
+enum MsgType
+{
+    BROWSE_REQUEST = 0; // 浏览可选文件请求 ：不携带消息体
+    BROWSE_RESPONSE = 1; // 浏览可选文件响应 ：发送文件列表
+    FILE_UPLOAD_REQUEST = 2;  // 文件上传请求 ： 发送文件摘要 
+    FILE_DOWNLOAD_REQUEST = 3;  // 文件下载请求 : 发送文件名
+    FILE_DOWNLOAD_RESPONSE = 4; // 文件下载响应 : 发送文件摘要
+    FILE_TRANSFER = 5; // 文件分片内容传输
+    STATUS_UPDATE = 6; // 传输状态更新请求 ：发送最新状态
+    ACK = 7; // ack 
+    PING = 8; // 心跳探测 ：不携带消息体
+    PONG = 9; // 心跳响应 ：不携带消息体
+    AUTH_REQUEST = 10; // 身份验证请求
+    AUTH_RESPONSE = 11; // 身份验证响应
+    CLOSE = 12; // 关闭连接
+}
+
+enum AuthRequestState
+{
+    LOGIN = 0;
+    REGISTER = 1;
+    LOGINOUT = 2;
+}
+
+message AuthRequest
+{
+    AuthRequestState auth_request_state = 1;
+    string username = 2;
+    string passwd = 3;
+}
+
+enum AuthResponseState
+{
+    LOGIN_SUCCESS = 0;
+    REGISTER_SUCCESS = 1;
+    LOGOUT_SUCCESS = 2;
+    PASSWD_ERROR = 3;
+    USER_NOT_EXIT = 4;
+    USER_ALEADY_EXIT = 5;
+    UNKNOW_ERROR = 6;
+}
+
+message AuthResponse
+{
+    AuthResponseState auth_response_state = 1;
+    // string info = 2;
+}
+
+message BrowseResponse
+{
+    repeated string filenames = 1; // 可选文件名数组
+}
+
+message FileSummary
+{
+    string filename = 1;
+    string format = 2;
+    string filehash = 3;
+    fixed64 filesize = 4;
+    fixed32 total_chunk = 5; // 分片总数
+}
+
+message FileDownloadRequest
+{
+    string filename = 1;
+}
+
+message FileTransfer
+{
+    Status status = 1;
+    string filehash = 2;
+    fixed32 chunk_index = 3;
+    fixed64 data_len = 4;
+    bytes data =5;
+}
+
+message StatusUpdate
+{
+    Status status = 1;
+    fixed32 need_chunk_index = 2;
+}
+
+message MsgHeader  // 定长消息头，4+4+4+4+4=20字节
+{
+    fixed32 magic = 1; // 4字节
+    fixed32 version = 2; 
+    fixed32 length = 3; // 消息体长度，4字节
+    fixed32 session_id = 4;
+    MsgType type = 5;  // 消息类型
+}
+
+message MsgBody
+{
+    oneof body
+    {
+        BrowseResponse browse_response = 1;
+        FileSummary file_summary = 2;
+        FileDownloadRequest file_download_request = 3;
+        FileTransfer file_transfer = 4;
+        StatusUpdate status_update = 5;
+        AuthRequest auth_request = 6;
+        AuthResponse auth_response = 7;
+    }
+}

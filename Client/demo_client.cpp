@@ -10,13 +10,21 @@
 #include <netinet/in.h>
 #include <iostream>
 #include <errno.h>
+#include <cmath>
+#include <istream>
+#include <sstream>
+
+#include "../src/protocol/protocol.pb.h"
+#include "../src/db/user.h"
 
 using namespace std;
  
 #define portnum 12345
 #define FILE_SIZE 500 
-#define BUFFER_SIZE 1024
- 
+#define BUFFER_SIZE (10*1024)
+#define HEADER_LEN 20
+#define FILE_NAME_LEN 50
+
 struct fileContext
 {
 	char filename[50];
@@ -29,8 +37,37 @@ void showmenu()
             "1) browse           2) upload\n"
             "3) download         4) quit\n";
 }
+std::vector<std::string> split(std::string str, char del) 
+{
+	std::stringstream ss(str);
+	std::string temp;
+	std::vector<std::string> ret;
+	while (getline(ss, temp, del)) {
+		ret.push_back(temp);
+	}
+	return ret;
+}
 
-// int sendfile(int sockfd);
+std::string get_file_md5(string filepath)
+{
+    char cwd[100];
+    getcwd(cwd,sizeof(cwd));
+    chdir(cwd);
+    char cmd[100] = "md5sum ";
+    strcat(cmd,filepath.c_str());
+    FILE* pipe = popen(cmd,"r");
+    if(!pipe)
+    {
+        printf("popen error.\n");
+        exit(2);
+    }
+    std::string result;
+    char buffer[200];
+    fgets(buffer,sizeof(buffer),pipe);
+    result = split(buffer,' ')[0];
+    return result;
+}
+
  
 int main()
 {
@@ -59,73 +96,185 @@ int main()
 	int choice;
 	std::cin>>choice;
 	std::cin.sync();
+
+	fileprotocol::MsgHeader send_header;
+	fileprotocol::MsgBody send_body;
+	send_header.set_magic(0xABCD);
+	send_header.set_version(240810);
+	char send_header_bytes[HEADER_LEN];
+	// 登录
+	string username;
+	string passwd;
+	std::cout<<"username:";
+	std::cin>>username;
+	std::cout<<"password:";
+	std::cin>>passwd;
+	send_header.set_type(fileprotocol::MsgType::LOGIN_REQUEST);
+	fileprotocol::LoginRequest* login_request = send_body.mutable_login_request();
+	login_request->set_username(username);
+	login_request->set_passwd(passwd);
+	uint32_t send_body_size = send_body.ByteSize();
+	send_header.set_length(send_body_size);
+	send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+	char send_body_bytes[send_body_size];
+	send_body.SerializeToArray(send_body_bytes,sizeof(send_body_bytes));
+	send(client_fd,send_header_bytes,sizeof(send_header_bytes),0);
+	send(client_fd,send_body_bytes,send_body_size,0);
+
+	fileprotocol::MsgHeader recv_ack_header;
+    char recv_ack_header_bytes[HEADER_LEN];
+	recv(client_fd,recv_ack_header_bytes,sizeof(recv_ack_header_bytes),0);
+	recv_ack_header.ParseFromArray(recv_ack_header_bytes,sizeof(recv_ack_header_bytes));
+	if(recv_ack_header.type() != fileprotocol::MsgType::ACK)
+    {
+        std::cout<<"login error."<<std::endl;
+    }
+        return true;
+
+
 	
 	while(1)
 	{
 		char choice_send[4] = {0};
 		sprintf(choice_send,"%d",choice);
-  		// itoa(choice,choice_send, 10);
-  		send(client_fd, choice_send, sizeof(choice_send), 0);
-  		// 浏览服务器上的文件
+		send_header.Clear();
+		send_body.clear_body();
+		
   		if(choice == 1)
   		{
-    		char allfilesname[500];
-    		recv(client_fd, allfilesname, sizeof(allfilesname), 0);
-    		std::cout<<"Files on the server:"<<std::endl;
-    		// 字符串分割
-    		char *token;
-    		token = strtok(allfilesname,";");
+			send_header.set_type(fileprotocol::MsgType::BROWSE_REQUEST);
+			send_header.set_length(0);
+    		send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+			send(client_fd,send_header_bytes,sizeof(send_header_bytes),0);
+			
+			fileprotocol::MsgHeader recv_header;
+			char recv_header_bytes[HEADER_LEN];
+			recv(client_fd,recv_header_bytes,sizeof(recv_header_bytes),0);
+			recv_header.ParseFromArray(recv_header_bytes,sizeof(recv_header_bytes));
 
-    		while(token!=NULL)
-    		{
-        		std::cout<<token<<std::endl;
-        		token = strtok(NULL,";");
-    		}
-    		getchar();
+			if(recv_header.magic()!=0xABCD || recv_header.version()!=240810)
+			{
+				std::cout<<"not my package."<<std::endl;
+				continue;
+			}
+
+			fileprotocol::MsgBody recv_body;
+			uint32_t recv_body_size = recv_header.length();
+			char recv_body_bytes[recv_body_size];
+			recv(client_fd,recv_body_bytes,sizeof(recv_body_bytes),0);
+			recv_body.ParseFromArray(recv_body_bytes,sizeof(recv_body_bytes));
+			std::cout<<"Files on the server:"<<std::endl;
+			for(auto filename:recv_body.browse_response().filenames())
+			{
+				std::cout<<filename<<std::endl;
+			}
+			// 发送ack包告诉服务器已收到
+			send_header.set_type(fileprotocol::MsgType::ACK);
+			memset(send_header_bytes,0,sizeof(send_header_bytes));
+			send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+			send(client_fd,send_header_bytes,sizeof(send_header_bytes),0);
+			getchar();
   		}
-  		else if (choice == 2)
+  		else if (choice == 2) // 上传
   		{
-    		fileContext fileCtx;
-    		char filename[50] ={0};
+    		
+			fileprotocol::MsgBody send_body;
+			fileprotocol::FileSummary* file_summary = send_body.mutable_file_summary();
+			// fileprotocol::FileSummary file_summary;
+
+			string filename;
     		std::cout<<"please input upload file's name:"<<std::endl;
     		std::cin>>filename;
-
-    		FILE *fp = fopen(filename, "rb");
-    		fseek( fp, 0, SEEK_END );
+    		FILE *fp = fopen(filename.c_str(), "rb");
+    		fseek( fp, 0, SEEK_END);
     		int totalSize =  ftell(fp);
     		fclose(fp);
-  
-    		// ftp client发送文件长度及文件名
-    		char fileSizeStr[20] = {0};
-			sprintf(fileSizeStr,"%d",totalSize);
-    		// itoa(totalSize, fileSizeStr, 10);
-    		fileCtx.filesize = totalSize;
-    		strcpy(fileCtx.filename,filename);
 
-    		// send(sockClient, fileSizeStr, strlen(fileSizeStr) + 1, 0);
+			// 发送文件摘要
+			send_header.set_type(fileprotocol::MsgType::FILE_UPLOAD_REQUEST);
+    		file_summary->set_filename(filename);
+			file_summary->set_format(filename.substr(filename.find_last_of('.') + 1));
+			file_summary->set_filehash(get_file_md5(filename));
+			file_summary->set_filesize(totalSize);
+			// send_body.set_allocated_file_summary(&file_summary);
+			uint32_t send_body_size = send_body.ByteSize();
+			send_header.set_length(send_body_size);
+			char* send_body_bytes = new char[send_body_size];
+			send_body.SerializeToArray(send_body_bytes,send_body_size);
+			char send_header_bytes[HEADER_LEN];
+			send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+			send(client_fd,send_header_bytes,sizeof(send_header_bytes),0);
+      		send(client_fd,send_body_bytes,send_body_size,0);
+			delete send_body_bytes;
 
-    		send(client_fd, (char*)&fileCtx, sizeof(fileCtx), 0);
+			std::cout<<"filename:"<<file_summary->filename()<<std::endl;
+			std::cout<<"fileformat:"<<file_summary->format()<<std::endl;
+			std::cout<<"filehash:"<<file_summary->filehash()<<std::endl;
+			std::cout<<"filesize:"<<file_summary->filesize()<<std::endl;
 
 
-    		// ftp client
-  
-    		// ftp client发送文件
-    		fp = fopen(filename, "rb");
+			//接收ack
+			fileprotocol::MsgHeader recv_header;
+			char recv_header_bytes[HEADER_LEN];
+			recv(client_fd,recv_header_bytes,sizeof(recv_header_bytes),0);
+			recv_header.ParseFromArray(recv_header_bytes,sizeof(recv_header_bytes));
+			if(recv_header.type()!=fileprotocol::MsgType::ACK)
+			{
+				std::cout<<"server maybe refused."<<std::endl;
+				break;
+			}
+			
+			// 发送文件内容
+			uint32_t filesize = file_summary->filesize();
+			string filehash = file_summary->filehash();
+			send_header.clear_type();
+			send_header.set_type(fileprotocol::MsgType::FILE_TRANSFER);
+			send_body.clear_body();
+			fileprotocol::FileTransfer* file_transfer = send_body.mutable_file_transfer();
+			// fileprotocol::FileTransfer file_transfer;
+			file_transfer->set_status(fileprotocol::Status::TRANSFERRING);
+			file_transfer->set_filehash(filehash);
+			
+    		fp = fopen(filename.c_str(), "rb");
     		int  readSize = 0;
     		int  sendTotalSize = 0;
-    		char sendBuf[1024*1024] = {0};
-    		while((readSize = fread(sendBuf, 1, sizeof(sendBuf), fp)) > 0)
+    		char sendBuf[filesize] = {0};
+    		while(sendTotalSize<filesize)
     		{
-      			send(client_fd, sendBuf, readSize, 0); 
+      			readSize = fread(sendBuf, 1, sizeof(sendBuf), fp); 
       			sendTotalSize += readSize;
-  
-      			printf("sent %f KB\n", sendTotalSize/(1024.0));
     		}
     		fclose(fp);
-  
-    		if(sendTotalSize == totalSize) printf("Done!\n");
-    		else printf("Error!");
-    
+			file_transfer->set_chunk_index(0);
+			file_transfer->set_data_len(sizeof(sendBuf));
+			file_transfer->set_data(sendBuf,sizeof(sendBuf));
+
+			send_body_size = send_body.ByteSize();
+			send_header.clear_length();
+			send_header.set_length(send_body_size);
+			char* send_body_bytes_ctx = new char[send_body_size];
+			send_body.SerializeToArray(send_body_bytes_ctx,send_body_size);
+			memset(send_header_bytes,0,sizeof(send_header_bytes));
+			send_header.SerializeToArray(send_header_bytes,sizeof(send_header_bytes));
+			send(client_fd,send_header_bytes,sizeof(send_header_bytes),0);
+      		send(client_fd,send_body_bytes_ctx,send_body_size,0);
+			
+
+			// 接收ACK
+			memset(recv_header_bytes,0,sizeof(recv_header_bytes));
+			recv(client_fd,recv_header_bytes,sizeof(recv_header_bytes),0);
+			recv_header.Clear();
+			recv_header.ParseFromArray(recv_header_bytes,sizeof(recv_header_bytes));
+			if(recv_header.type()==fileprotocol::MsgType::ACK)
+			{
+				printf("sent %f KB\n", sendTotalSize/(1024.0));
+			}
+			else
+			{
+				printf("Error!");
+				break;
+			}
+			delete send_body_bytes_ctx;
     		getchar();
   		}
   		// 客户端下载文件

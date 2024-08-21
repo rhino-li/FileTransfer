@@ -6,10 +6,15 @@
             "command": "/usr/bin/g++",
             "args": [
                 "-fdiagnostics-color=always",
+                "-std=c++11",
                 "-g",
                 "${workspaceFolder}/src/*.cpp",
+                "${workspaceFolder}/src/db/*.cpp",
+                "${workspaceFolder}/src/protocol/protocol.pb.cc",
                 "${file}",
                 "-lpthread",
+                "-lprotobuf",
+                "-lmysqlclient",
                 "-o",
                 "${fileDirname}/${fileBasenameNoExtension}"
             ],
